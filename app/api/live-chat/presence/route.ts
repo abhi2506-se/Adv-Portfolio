@@ -21,11 +21,17 @@ function isAdminAuthed(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const { chatId, active } = body
+    const { chatId, active, role: claimedRole } = body
     if (!chatId) return NextResponse.json({ error: 'Missing chatId' }, { status: 400 })
 
+    // The caller (admin panel vs public widget) already knows which role it
+    // is — trust that claim, but only let it through as 'admin' if the
+    // session cookie actually validates. This avoids silently mis-recording
+    // an admin heartbeat as 'user' (or vice versa) whenever cookie inference
+    // alone gets it wrong, which is what was breaking online/offline/last
+    // seen and read receipts on the admin side.
     const admin = isAdminAuthed(req)
-    const role: 'user' | 'admin' = admin ? 'admin' : 'user'
+    const role: 'user' | 'admin' = claimedRole === 'admin' ? (admin ? 'admin' : 'user') : 'user'
     const { deviceId, isNew, token } = getOrCreateDeviceId(req)
 
     const presence = await heartbeat(chatId, role, !!active)
