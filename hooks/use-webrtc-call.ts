@@ -110,7 +110,9 @@ export function useWebRTCCall({ chatId, role, onSignal, logCall }: UseWebRTCCall
   )
 
   const localStreamRef = useRef<MediaStream | null>(null)
-  const remoteStreamRef = useRef<MediaStream>(new MediaStream())
+  const remoteStreamRef = useRef<MediaStream | null>(
+    typeof MediaStream !== 'undefined' ? new MediaStream() : null
+  )
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const callIdRef = useRef<string | null>(null)
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([])
@@ -324,7 +326,7 @@ export function useWebRTCCall({ chatId, role, onSignal, logCall }: UseWebRTCCall
     rawVideoTrackRef.current = null
     stopFilterPipeline()
     setVideoFilter('none')
-    remoteStreamRef.current.getTracks().forEach(t => remoteStreamRef.current.removeTrack(t))
+    remoteStreamRef.current?.getTracks().forEach(t => remoteStreamRef.current?.removeTrack(t))
     if (remoteAudioEl.current) remoteAudioEl.current.srcObject = null
     if (remoteVideoEl.current) remoteVideoEl.current.srcObject = null
     pendingCandidatesRef.current = []
@@ -396,7 +398,9 @@ export function useWebRTCCall({ chatId, role, onSignal, logCall }: UseWebRTCCall
     pc.ontrack = (e) => {
       // Add any new tracks to the remote stream (guard against duplicates).
       e.streams[0]?.getTracks().forEach(t => {
-        if (!remoteStreamRef.current.getTracks().includes(t)) remoteStreamRef.current.addTrack(t)
+        if (remoteStreamRef.current && !remoteStreamRef.current.getTracks().includes(t)) {
+          remoteStreamRef.current.addTrack(t)
+        }
       })
       attachRemoteStream()
     }
