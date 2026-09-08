@@ -53,7 +53,7 @@ export function usePresence(chatId: string | null, role: 'user' | 'admin', isAdm
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ chatId, active }),
+        body: JSON.stringify({ chatId, active, role }),
       })
       if (res.ok) {
         const data = await res.json()
@@ -64,7 +64,7 @@ export function usePresence(chatId: string | null, role: 'user' | 'admin', isAdm
     } catch (err) {
       console.error('[live-chat] presence heartbeat error', err)
     }
-  }, [chatId, computeActive])
+  }, [chatId, role, computeActive])
 
   // Mark activity on any user interaction.
   useEffect(() => {
@@ -85,14 +85,14 @@ export function usePresence(chatId: string | null, role: 'user' | 'admin', isAdm
     activeRef.current = false
     try {
       if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
-        const blob = new Blob([JSON.stringify({ chatId, active: false })], { type: 'application/json' })
+        const blob = new Blob([JSON.stringify({ chatId, active: false, role })], { type: 'application/json' })
         const ok = navigator.sendBeacon('/api/live-chat/presence', blob)
         if (ok) return
       }
     } catch {}
     // Fallback for browsers without sendBeacon support.
     sendHeartbeat(false)
-  }, [chatId, sendHeartbeat])
+  }, [chatId, role, sendHeartbeat])
 
   // Immediate heartbeat on visibility/focus change (so status flips instantly).
   useEffect(() => {
