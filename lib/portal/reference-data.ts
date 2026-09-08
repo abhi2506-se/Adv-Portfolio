@@ -1,0 +1,30 @@
+export const COUNTRIES = [
+  { code: "IN", name: "India" },
+  { code: "US", name: "United States" },
+  { code: "GB", name: "United Kingdom" },
+  { code: "CA", name: "Canada" },
+  { code: "AU", name: "Australia" },
+  { code: "AE", name: "United Arab Emirates" },
+  { code: "DE", name: "Germany" },
+  { code: "FR", name: "France" },
+  { code: "SG", name: "Singapore" },
+  { code: "NZ", name: "New Zealand" },
+  { code: "ZA", name: "South Africa" },
+  { code: "BR", name: "Brazil" },
+  { code: "JP", name: "Japan" },
+  { code: "ES", name: "Spain" },
+  { code: "IT", name: "Italy" },
+]
+
+export const LANGUAGES = [
+  { code: "en", name: "English" },
+  { code: "hi", name: "Hindi" },
+  { code: "es", name: "Spanish" },
+  { code: "fr", name: "French" },
+  { code: "de", name: "German" },
+  { code: "ar", name: "Arabic" },
+  { code: "pt", name: "Portuguese" },
+  { code: "ja", name: "Japanese" },
+  { code: "zh", name: "Chinese" },
+  { code: "ru", name: "Russian" },
+]

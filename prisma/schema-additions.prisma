@@ -1,0 +1,42 @@
+// ─── Add to your existing schema.prisma ──────────────────────────────────────
+// This is an ADDITIVE snippet — paste these models into your existing schema.
+
+// Cache for project analyses (prevents re-fetching GitHub on every page load)
+model CachedAnalysis {
+  id          String   @id @default(cuid())
+  cacheKey    String   @unique          // e.g. "analysis:https://github.com/user/repo"
+  projectSlug String?
+  repoUrl     String
+  data        Json                      // Full ProjectAnalysis JSON
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime                  // Set to now() + 1 hour on write
+  hitCount    Int      @default(0)      // How many times this cache was served
+
+  @@index([cacheKey])
+  @@index([expiresAt])
+  @@index([projectSlug])
+}
+
+// Track which projects have been analyzed (for dashboard)
+model ProjectView {
+  id          String   @id @default(cuid())
+  projectSlug String
+  repoUrl     String?
+  viewedAt    DateTime @default(now())
+  userAgent   String?
+  country     String?
+
+  @@index([projectSlug])
+  @@index([viewedAt])
+}
+
+// Store AI chat history per project (optional — for analytics)
+model ProjectChatLog {
+  id          String   @id @default(cuid())
+  projectSlug String
+  question    String
+  answer      String   @db.Text
+  createdAt   DateTime @default(now())
+
+  @@index([projectSlug])
+}
