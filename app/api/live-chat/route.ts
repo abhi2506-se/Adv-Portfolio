@@ -233,7 +233,7 @@ export async function POST(req: NextRequest) {
     if (action === 'view_media') {
       const { chatId, messageId } = body
       if (!chatId || !messageId) return NextResponse.json({ error: 'Missing fields' }, { status: 400 })
-      const role: 'user' | 'admin' = isAdminAuthed(req) ? 'admin' : 'user'
+      const role: 'user' | 'admin' = body.role === 'admin' ? (isAdminAuthed(req) ? 'admin' : 'user') : 'user'
       if (role === 'user') {
         const chatRow = (await sql`SELECT device_id FROM live_chats WHERE id = ${chatId}`)[0]
         if (!chatRow || chatRow.device_id !== deviceId) return NextResponse.json({ error: 'Unauthorized' }, { status: 403 })
@@ -247,7 +247,7 @@ export async function POST(req: NextRequest) {
     // ── Edit message (60s window, enforced server-side) ───────────────────
     if (action === 'edit_message') {
       const { chatId, messageId, content } = body
-      const role: 'user' | 'admin' = isAdminAuthed(req) ? 'admin' : 'user'
+      const role: 'user' | 'admin' = body.role === 'admin' ? (isAdminAuthed(req) ? 'admin' : 'user') : 'user'
       if (role === 'user') {
         const chatRow = (await sql`SELECT device_id FROM live_chats WHERE id = ${chatId}`)[0]
         if (!chatRow || chatRow.device_id !== deviceId) return NextResponse.json({ error: 'Unauthorized' }, { status: 403 })
@@ -261,7 +261,7 @@ export async function POST(req: NextRequest) {
     // ── Unsend message (15s window, enforced server-side) ─────────────────
     if (action === 'unsend_message') {
       const { chatId, messageId } = body
-      const role: 'user' | 'admin' = isAdminAuthed(req) ? 'admin' : 'user'
+      const role: 'user' | 'admin' = body.role === 'admin' ? (isAdminAuthed(req) ? 'admin' : 'user') : 'user'
       if (role === 'user') {
         const chatRow = (await sql`SELECT device_id FROM live_chats WHERE id = ${chatId}`)[0]
         if (!chatRow || chatRow.device_id !== deviceId) return NextResponse.json({ error: 'Unauthorized' }, { status: 403 })
@@ -275,7 +275,7 @@ export async function POST(req: NextRequest) {
     // ── React to a message (❤️ 😂 👍 🔥 😮 😢 — tap again to remove) ──────
     if (action === 'toggle_reaction') {
       const { chatId, messageId, emoji } = body
-      const role: 'user' | 'admin' = isAdminAuthed(req) ? 'admin' : 'user'
+      const role: 'user' | 'admin' = body.role === 'admin' ? (isAdminAuthed(req) ? 'admin' : 'user') : 'user'
       if (role === 'user') {
         const chatRow = (await sql`SELECT device_id FROM live_chats WHERE id = ${chatId}`)[0]
         if (!chatRow || chatRow.device_id !== deviceId) return NextResponse.json({ error: 'Unauthorized' }, { status: 403 })
@@ -289,7 +289,7 @@ export async function POST(req: NextRequest) {
     // ── Star / unstar a message (per-side; doesn't need to notify the other side) ──
     if (action === 'toggle_star') {
       const { chatId, messageId } = body
-      const role: 'user' | 'admin' = isAdminAuthed(req) ? 'admin' : 'user'
+      const role: 'user' | 'admin' = body.role === 'admin' ? (isAdminAuthed(req) ? 'admin' : 'user') : 'user'
       if (role === 'user') {
         const chatRow = (await sql`SELECT device_id FROM live_chats WHERE id = ${chatId}`)[0]
         if (!chatRow || chatRow.device_id !== deviceId) return NextResponse.json({ error: 'Unauthorized' }, { status: 403 })
@@ -314,8 +314,14 @@ export async function POST(req: NextRequest) {
 
     // ── Delivery / read receipts ──────────────────────────────────────────
     if (action === 'mark_delivered' || action === 'mark_read') {
-      const { chatId } = body
-      const role: 'user' | 'admin' = isAdminAuthed(req) ? 'admin' : 'user'
+      const { chatId, role: claimedRole } = body
+      // Trust the caller's own claim (the admin panel always sends
+      // role: 'admin', the public widget never does) but only honor an
+      // 'admin' claim once the session cookie actually validates — this
+      // stops a flaky/expired cookie from silently downgrading a real
+      // admin's read receipts to 'user' (which is what broke tick status
+      // and online/offline/last-seen on the admin side).
+      const role: 'user' | 'admin' = claimedRole === 'admin' ? (isAdminAuthed(req) ? 'admin' : 'user') : 'user'
       const ids = action === 'mark_delivered' ? await markDelivered(chatId, role) : await markRead(chatId, role)
       if (ids.length) await broadcastToChat(chatId, 'receipts_updated', { ids, status: action === 'mark_delivered' ? 'delivered' : 'read' })
       return NextResponse.json({ ok: true, updated: ids.length })
@@ -398,7 +404,7 @@ export async function POST(req: NextRequest) {
     //    deleted; they stay fully intact for the admin/archive. ────────────
     if (action === 'end_chat') {
       const { chatId, reason } = body
-      const role: 'user' | 'admin' = isAdminAuthed(req) ? 'admin' : 'user'
+      const role: 'user' | 'admin' = body.role === 'admin' ? (isAdminAuthed(req) ? 'admin' : 'user') : 'user'
       let visitorName = 'Visitor'
       if (role === 'user') {
         const chatRow = (await sql`SELECT device_id, user_name FROM live_chats WHERE id = ${chatId}`)[0]
