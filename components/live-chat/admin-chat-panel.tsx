@@ -34,7 +34,15 @@ function newClientId() {
 }
 
 async function api(action: string, extra: Record<string, any> = {}) {
-  const res = await fetch('/api/live-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...extra }) })
+  const res = await fetch('/api/live-chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    // This helper is only ever used by the admin panel, so always assert
+    // role: 'admin' explicitly rather than letting the server infer it
+    // solely from the session cookie — see app/api/live-chat/route.ts.
+    body: JSON.stringify({ action, role: 'admin', ...extra }),
+  })
   return res.json().catch(() => ({}))
 }
 
