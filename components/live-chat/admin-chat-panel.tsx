@@ -12,6 +12,7 @@ import { ReplyPreview, EndChatConfirm, DeleteChatConfirm } from './reply-preview
 import { CallModal } from './call-modal'
 import { MediaComposer, type PendingMedia } from './media-composer'
 import { MediaViewerModal } from './media-viewer-modal'
+import { TypingIndicator } from './typing-indicator'
 import { VoiceRecorder, type PendingVoiceNote } from './voice-recorder'
 import { EmojiPicker, EmojiPickerButton } from './emoji-picker'
 import { ForwardPicker } from './forward-picker'
@@ -104,6 +105,7 @@ export function AdminChatPanel() {
   const isMobile = useIsMobile()
   const bottomRef = useRef<HTMLDivElement>(null)
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const userTypingExpiry = useRef<ReturnType<typeof setTimeout> | null>(null)
   const messageMap = useRef<Map<string, LiveChatMessage>>(new Map())
   const [, forceTick] = useState(0)
 
@@ -172,7 +174,7 @@ export function AdminChatPanel() {
 
   useEffect(() => { loadChats(); const t = setInterval(loadChats, 4000); return () => clearInterval(t) }, [loadChats])
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [selectedId, messageMap.current.size])
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [selectedId, messageMap.current.size, userTyping])
 
   const loadSaved = useCallback(async () => {
     const res = await fetch('/api/live-chat?saved=1')
@@ -337,11 +339,21 @@ export function AdminChatPanel() {
 
   // ── Realtime ──────────────────────────────────────────────────────────
   const { sendCallSignal } = useLiveChatRealtime(selectedId, {
-    onNewMessage: (m) => { if (m.chat_id === selectedId) syncMessages(map => mergeIncomingMessage(map, m)) },
+    onNewMessage: (m) => {
+      if (m.chat_id !== selectedId) return
+      // Like WhatsApp: the typing bubble disappears the moment their message lands.
+      if (m.role === 'user') { setUserTyping(false); if (userTypingExpiry.current) clearTimeout(userTypingExpiry.current) }
+      syncMessages(map => mergeIncomingMessage(map, m))
+    },
     onMessageUpdated: (m) => { if (m.chat_id === selectedId) syncMessages(map => mergeIncomingMessage(map, m)) },
     onReceiptsUpdated: (ids, status) => syncMessages(map => { for (const id of ids) { const ex = map.get(id); if (ex) map.set(id, { ...ex, status }) } }),
     onPresence: (role, info) => setPresenceFromBroadcast(role, info as any),
-    onTyping: (role) => { if (role === 'user') { setUserTyping(true); setTimeout(() => setUserTyping(false), 3500) } },
+    onTyping: (role) => {
+      if (role !== 'user') return
+      setUserTyping(true)
+      if (userTypingExpiry.current) clearTimeout(userTypingExpiry.current)
+      userTypingExpiry.current = setTimeout(() => setUserTyping(false), 4500)
+    },
     onChatEnded: (by, reason) => {
       loadChats()
       if (by === 'user') {
@@ -696,7 +708,7 @@ export function AdminChatPanel() {
                   )
                 })
               })()}
-              {userTyping && <p className="px-4 text-xs text-white/40 italic">{selected.user_name} is typing…</p>}
+              {userTyping && <TypingIndicator name={selected.user_name} />}
               <div ref={bottomRef} />
               </div>
             </div>
