@@ -506,13 +506,15 @@ function KeptMediaTile({ message, onOpen }: { message: LiveChatMessage; onOpen: 
     <button
       type="button"
       onClick={onOpen}
-      className="relative block w-full max-w-[220px] rounded-xl overflow-hidden mb-1.5"
+      className="relative block w-full max-w-[240px] rounded-xl overflow-hidden mb-1.5 bg-black/10"
     >
       {url && isVideo ? (
-        <video src={url} className="w-full max-h-56 object-cover" muted />
+        <video src={url} className="w-full max-h-72 object-contain" muted />
       ) : url ? (
+        // object-contain (not cover): show the WHOLE picture in the bubble
+        // instead of centre-cropping tall images. Tap opens the zoomable viewer.
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={url} alt="Shared media" className="w-full max-h-56 object-cover" />
+        <img src={url} alt="Shared media" className="w-full max-h-72 object-contain" loading="lazy" />
       ) : (
         <div className="w-full h-28 flex items-center justify-center bg-foreground/10">
           {isVideo ? <VideoIcon className="w-6 h-6 text-muted-foreground" /> : <ImageIcon className="w-6 h-6 text-muted-foreground" />}
