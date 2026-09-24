@@ -13,6 +13,7 @@ import { ReplyPreview, EndChatConfirm } from './reply-preview'
 import { CallModal, CallStartButtons } from './call-modal'
 import { MediaComposer, type PendingMedia } from './media-composer'
 import { MediaViewerModal } from './media-viewer-modal'
+import { TypingIndicator } from './typing-indicator'
 import { VoiceRecorder, type PendingVoiceNote } from './voice-recorder'
 import { EmojiPicker, EmojiPickerButton } from './emoji-picker'
 import { WallpaperPicker, WallpaperPickerButton, LiveWallpaperOverlay } from './wallpaper-picker'
@@ -112,6 +113,7 @@ export function UserChatPanel({ chatId, onClose, onEnded, onMinimize, externalCa
   const [mounted, setMounted] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const adminTypingExpiry = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // ── Archive (older messages beyond the latest 20 shown live) ───────────
   const [hasArchive, setHasArchive] = useState(false)
@@ -169,7 +171,7 @@ export function UserChatPanel({ chatId, onClose, onEnded, onMinimize, externalCa
     return () => { stop = true; clearInterval(interval) }
   }, [chatId, syncMessages, ended])
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages.length])
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages.length, adminTyping])
 
   // Mark admin messages delivered/read while this panel is open.
   useEffect(() => {
@@ -190,11 +192,21 @@ export function UserChatPanel({ chatId, onClose, onEnded, onMinimize, externalCa
 
   // ── Realtime ─────────────────────────────────────────────────────────────
   const { sendCallSignal } = useLiveChatRealtime(chatId, {
-    onNewMessage: (m) => syncMessages(map => mergeIncomingMessage(map, m)),
+    onNewMessage: (m) => {
+      // Like WhatsApp: the typing bubble disappears the moment their message lands.
+      if (m.role === 'admin') { setAdminTyping(false); if (adminTypingExpiry.current) clearTimeout(adminTypingExpiry.current) }
+      syncMessages(map => mergeIncomingMessage(map, m))
+    },
     onMessageUpdated: (m) => syncMessages(map => mergeIncomingMessage(map, m)),
     onReceiptsUpdated: (ids, status) => syncMessages(map => { for (const id of ids) { const ex = map.get(id); if (ex) map.set(id, { ...ex, status }) } }),
     onPresence: (role, info) => setPresenceFromBroadcast(role, info as any),
-    onTyping: (role) => { if (role === 'admin') { setAdminTyping(true); setTimeout(() => setAdminTyping(false), 3500) } },
+    onTyping: (role) => {
+      if (role !== 'admin') return
+      setAdminTyping(true)
+      // Reset (not stack) the expiry so the bubble doesn't flicker while typing continues.
+      if (adminTypingExpiry.current) clearTimeout(adminTypingExpiry.current)
+      adminTypingExpiry.current = setTimeout(() => setAdminTyping(false), 4500)
+    },
     onChatEnded: (by, reason) => { setEnded(by); setEndReason(reason || null) },
     onCallSignal: (payload) => call.handleSignal(payload),
     onWallpaperChanged: (payload) => { if (payload.wallpaperId) setWallpaperId(payload.wallpaperId) },
@@ -619,7 +631,7 @@ export function UserChatPanel({ chatId, onClose, onEnded, onMinimize, externalCa
             )
           })
         })()}
-        {adminTyping && <p className="px-4 text-xs text-muted-foreground italic">Abhishek is typing…</p>}
+        {adminTyping && !ended && <TypingIndicator name="Abhishek" />}
         <div ref={bottomRef} />
         </div>
       </div>
