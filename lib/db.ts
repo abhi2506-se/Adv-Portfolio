@@ -31,8 +31,31 @@ let migrated = false
 // Both names refer to the same underlying getDB logic.
 export const initDb = () => getDB()
 
+// The full migration runs at most once per instance. If it fails part-way
+// (transient Neon error, a race between two serverless instances creating the
+// same table, …) we log it and hand back the client anyway — individual
+// queries then succeed or fail on their own merits — and retry the migration
+// at most once a minute. Previously a single failure here made getDB() throw
+// on every call, taking down every feature that touches the database.
+let migrating: Promise<void> | null = null
+let lastMigrationAttempt = 0
+
 export async function getDB() {
   if (!migrated) {
+    if (!migrating && Date.now() - lastMigrationAttempt > 60_000) {
+      lastMigrationAttempt = Date.now()
+      migrating = runMigrations()
+        .then(() => { migrated = true })
+        .catch(e => { console.error('[db] Migration step failed (will retry in 60s):', e) })
+        .finally(() => { migrating = null })
+    }
+    if (migrating) await migrating
+  }
+  return sql
+}
+
+async function runMigrations() {
+  {
     // ─── Admin credentials table (DB-backed, replaces env-var-only approach) ──
     await sql`CREATE TABLE IF NOT EXISTS admin_credentials (
       id        TEXT PRIMARY KEY DEFAULT 'main',
@@ -145,9 +168,7 @@ export async function getDB() {
     try { await sql`ALTER TABLE portfolio_blogs ADD COLUMN IF NOT EXISTS created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW()) * 1000` } catch {}
     try { await sql`ALTER TABLE portfolio_blogs ADD COLUMN IF NOT EXISTS updated_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW()) * 1000` } catch {}
 
-    migrated = true
   }
-  return sql
 }
 
 export async function dbGetBlogs() {
@@ -288,20 +309,35 @@ export async function dbSetSettings(settings: Record<string,string>) {
 
 // ─── Contact Messages ──────────────────────────────────────────────────────────
 //
-// Why the fallback file store exists:
-// The admin dashboard was showing an empty Messages tab even though users could
-// submit the form successfully. Root cause: every contact_messages DB call was
-// wrapped in try/catch that only logged and swallowed the error (or, for saves,
-// re-threw into a caller that ALSO swallowed it — see app/api/contact/route.ts).
-// If DATABASE_URL was missing/unreachable at submit time, the message was
-// accepted by the API (200 OK, e-mail sent) but never persisted anywhere, so it
-// could never appear for the admin. There was no durable fallback.
+// WHY MESSAGES WERE MISSING (root causes, all fixed here + in app/api/contact):
 //
-// Fix: every write now also lands in a small JSON file on disk
-// (data/contact-messages.json), and every read merges DB rows with file rows
-// (de-duplicated by id). This guarantees a submitted message is retrievable by
-// the admin panel even if the Postgres connection is down/misconfigured, while
-// still preferring/using the real DB whenever it's available.
+//  1. The contact_messages table was only created inside getDB()'s giant
+//     migration. If ANY statement in that migration threw (a later table, a
+//     transient Neon error, a race between two serverless instances…) then
+//     `migrated` never became true and getDB() threw on EVERY call — so the
+//     INSERT was never even attempted. The old code swallowed that error, the
+//     API still answered 200 "sent", and nothing reached the database.
+//     → The contact table now has its own small, self-contained, retry-able
+//       schema step (ensureContactSchema) that does not depend on getDB().
+//
+//  2. If a contact_messages table already existed from an older version with a
+//     different shape (missing `intent` / `archived` / `subject`, or
+//     `created_at` as a timestamp instead of a BIGINT), `CREATE TABLE IF NOT
+//     EXISTS` silently did nothing and every INSERT failed on a missing column.
+//     → ensureContactSchema() now adds any missing columns and adapts to the
+//       type of created_at.
+//
+//  3. Save failures were swallowed and the visitor was told "sent" anyway.
+//     → dbSaveContactMessage() now reports exactly what happened
+//       ({ stored, db, file, error }) and the API/admin panel surface it.
+//
+//  4. Reads swallowed DB errors and returned an empty list, which looks
+//     identical to "no messages". → reads now return { dbOk, dbError } so the
+//     admin panel can show a real error banner instead of an empty inbox.
+//
+// The JSON-file store below is kept only as a local-development safety net
+// (serverless hosts such as Vercel have a read-only / ephemeral disk, so it
+// can NOT be relied on in production — the database is the source of truth).
 import fs from 'fs'
 import path from 'path'
 
@@ -315,8 +351,7 @@ type ContactMessageRow = {
 function readContactStore(): ContactMessageRow[] {
   try {
     if (!fs.existsSync(CONTACT_STORE_PATH)) return []
-    const raw = fs.readFileSync(CONTACT_STORE_PATH, 'utf-8')
-    const parsed = JSON.parse(raw)
+    const parsed = JSON.parse(fs.readFileSync(CONTACT_STORE_PATH, 'utf-8'))
     return Array.isArray(parsed) ? parsed : []
   } catch (e) {
     console.error('[db] Failed to read contact message fallback store:', e)
@@ -324,72 +359,139 @@ function readContactStore(): ContactMessageRow[] {
   }
 }
 
-function writeContactStore(rows: ContactMessageRow[]) {
+/** Returns true if the file was written. */
+function writeContactStore(rows: ContactMessageRow[]): boolean {
   try {
     fs.mkdirSync(path.dirname(CONTACT_STORE_PATH), { recursive: true })
     fs.writeFileSync(CONTACT_STORE_PATH, JSON.stringify(rows, null, 2), 'utf-8')
+    return true
   } catch (e) {
-    // Read-only filesystems (some serverless hosts) will land here — the DB
-    // write is still attempted separately, so this is a soft failure.
-    console.error('[db] Failed to write contact message fallback store:', e)
+    // Read-only filesystems (Vercel / Cloudflare) land here — expected there.
+    console.warn('[db] Contact fallback file store not writable (expected on serverless hosts):', (e as any)?.message || e)
+    return false
   }
+}
+
+/** created_at can come back as a BIGINT string, a number, or a Date/ISO string. */
+function toMillis(v: any): number {
+  if (v instanceof Date) return v.getTime()
+  if (typeof v === 'number') return v
+  if (typeof v === 'string') {
+    if (/^\d+$/.test(v.trim())) return parseInt(v, 10)
+    const t = Date.parse(v)
+    return isNaN(t) ? 0 : t
+  }
+  return Number(v) || 0
 }
 
 function mergeContactRows(dbRows: any[], fileRows: ContactMessageRow[]): ContactMessageRow[] {
   const byId = new Map<string, ContactMessageRow>()
   for (const r of fileRows) byId.set(r.id, r)
   for (const r of dbRows || []) {
-    byId.set(r.id, {
+    byId.set(String(r.id), {
       id: String(r.id), name: String(r.name || ''), email: String(r.email || ''),
       subject: String(r.subject || ''), message: String(r.message || ''),
       intent: String(r.intent || 'general'), archived: Boolean(r.archived),
-      created_at: typeof r.created_at === 'string' ? parseInt(r.created_at, 10) : Number(r.created_at),
+      created_at: toMillis(r.created_at),
     })
   }
   return Array.from(byId.values()).sort((a, b) => b.created_at - a.created_at)
 }
 
-export async function dbSaveContactMessage(msg: { id: string; name: string; email: string; subject: string; message: string; intent: string; created_at: number }) {
-  // Always persist to the fallback file store first — this alone guarantees
-  // the message survives even if the DB call below fails entirely.
+// ── Self-contained schema step (independent of getDB's big migration) ────────
+let contactSchemaPromise: Promise<{ createdAtIsTimestamp: boolean }> | null = null
+
+async function ensureContactSchema(): Promise<{ createdAtIsTimestamp: boolean }> {
+  if (!contactSchemaPromise) {
+    contactSchemaPromise = (async () => {
+      await sql`CREATE TABLE IF NOT EXISTS contact_messages (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL DEFAULT '',
+        email TEXT NOT NULL DEFAULT '',
+        subject TEXT NOT NULL DEFAULT '',
+        message TEXT NOT NULL DEFAULT '',
+        intent TEXT NOT NULL DEFAULT 'general',
+        created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint,
+        archived BOOLEAN NOT NULL DEFAULT FALSE
+      )`
+      // Older installs may have a table with a different shape — add whatever is missing.
+      await sql`ALTER TABLE contact_messages ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT ''`
+      await sql`ALTER TABLE contact_messages ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''`
+      await sql`ALTER TABLE contact_messages ADD COLUMN IF NOT EXISTS subject TEXT NOT NULL DEFAULT ''`
+      await sql`ALTER TABLE contact_messages ADD COLUMN IF NOT EXISTS message TEXT NOT NULL DEFAULT ''`
+      await sql`ALTER TABLE contact_messages ADD COLUMN IF NOT EXISTS intent TEXT NOT NULL DEFAULT 'general'`
+      await sql`ALTER TABLE contact_messages ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE`
+      await sql`ALTER TABLE contact_messages ADD COLUMN IF NOT EXISTS created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint`
+      try { await sql`CREATE INDEX IF NOT EXISTS idx_contact_messages_created ON contact_messages(created_at DESC)` } catch {}
+
+      const cols = await sql`SELECT data_type FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'contact_messages' AND column_name = 'created_at'`
+      const t = String((cols as any)[0]?.data_type || '')
+      return { createdAtIsTimestamp: /timestamp|date/i.test(t) }
+    })().catch(e => {
+      contactSchemaPromise = null // allow a retry on the next request
+      throw e
+    })
+  }
+  return contactSchemaPromise
+}
+
+const errText = (e: any) => String(e?.message || e)
+
+export type ContactSaveResult = { stored: boolean; db: boolean; file: boolean; error?: string }
+
+export async function dbSaveContactMessage(msg: { id: string; name: string; email: string; subject: string; message: string; intent: string; created_at: number }): Promise<ContactSaveResult> {
+  const result: ContactSaveResult = { stored: false, db: false, file: false }
+
+  // Local-dev safety net (no-op on read-only serverless disks).
   try {
     const rows = readContactStore()
     if (!rows.some(r => r.id === msg.id)) {
       rows.unshift({ ...msg, archived: false })
-      writeContactStore(rows)
+      result.file = writeContactStore(rows)
+    } else {
+      result.file = true
     }
   } catch (e) {
     console.error('[db] Fallback save failed:', e)
   }
 
   try {
-    const db = await getDB()
-    const result = await db`INSERT INTO contact_messages (id, name, email, subject, message, intent, created_at) VALUES (${msg.id}, ${msg.name}, ${msg.email}, ${msg.subject}, ${msg.message}, ${msg.intent}, ${msg.created_at}) ON CONFLICT (id) DO NOTHING`
-    console.log('[db] Contact message saved:', msg.id)
-    return result
+    const { createdAtIsTimestamp } = await ensureContactSchema()
+    if (createdAtIsTimestamp) {
+      await sql`INSERT INTO contact_messages (id, name, email, subject, message, intent, created_at)
+        VALUES (${msg.id}, ${msg.name}, ${msg.email}, ${msg.subject}, ${msg.message}, ${msg.intent}, to_timestamp(${msg.created_at}::double precision / 1000))
+        ON CONFLICT (id) DO NOTHING`
+    } else {
+      await sql`INSERT INTO contact_messages (id, name, email, subject, message, intent, created_at)
+        VALUES (${msg.id}, ${msg.name}, ${msg.email}, ${msg.subject}, ${msg.message}, ${msg.intent}, ${msg.created_at})
+        ON CONFLICT (id) DO NOTHING`
+    }
+    result.db = true
+    console.log('[db] Contact message saved to database:', msg.id)
   } catch (e) {
-    console.error('[db] Failed to save contact message to DB (kept in fallback store):', e)
-    // Don't re-throw: the caller previously swallowed this anyway, and now
-    // the fallback store above has already preserved the message.
-    return null
+    result.error = errText(e)
+    console.error('[db] FAILED to save contact message to database:', e)
   }
+
+  result.stored = result.db || result.file
+  return result
 }
 
 export async function dbDeleteContactMessage(id: string) {
   try {
-    const rows = readContactStore().filter(r => r.id !== id)
-    writeContactStore(rows)
+    writeContactStore(readContactStore().filter(r => r.id !== id))
   } catch (e) {
     console.error('[db] Fallback delete failed:', e)
   }
   try {
-    const db = await getDB()
-    const result = await db`DELETE FROM contact_messages WHERE id = ${id}`
+    await ensureContactSchema()
+    const result = await sql`DELETE FROM contact_messages WHERE id = ${id}`
     console.log('[db] Contact message deleted:', id)
     return result
   } catch (e) {
     console.error('[db] Failed to delete contact message from DB:', e)
-    return null
+    throw e
   }
 }
 
@@ -402,63 +504,63 @@ export async function dbArchiveContactMessage(id: string) {
     console.error('[db] Fallback archive failed:', e)
   }
   try {
-    const db = await getDB()
-    const result = await db`UPDATE contact_messages SET archived = TRUE WHERE id = ${id}`
+    await ensureContactSchema()
+    const result = await sql`UPDATE contact_messages SET archived = TRUE WHERE id = ${id}`
     console.log('[db] Contact message archived:', id)
     return result
   } catch (e) {
     console.error('[db] Failed to archive contact message in DB:', e)
-    return null
+    throw e
   }
+}
+
+/** Read messages AND report whether the database was reachable, so the admin
+ *  UI can tell "no messages yet" apart from "the database is failing". */
+export async function dbGetContactMessagesWithStatus(limit = 50, includeArchived = true) {
+  const fileRows = readContactStore()
+  let dbRows: any[] = []
+  let dbOk = true
+  let dbError: string | undefined
+  try {
+    await ensureContactSchema()
+    dbRows = await sql`SELECT * FROM contact_messages ORDER BY created_at DESC LIMIT ${limit}` as any
+  } catch (e) {
+    dbOk = false
+    dbError = errText(e)
+    console.error('[db] Failed to read contact messages from DB (using fallback store only):', e)
+  }
+  let merged = mergeContactRows(dbRows, fileRows)
+  if (!includeArchived) merged = merged.filter(r => !r.archived)
+  return { rows: merged.slice(0, limit), dbOk, dbError }
 }
 
 export async function dbGetContactMessages(limit = 50) {
-  const fileRows = readContactStore()
-  let dbRows: any[] = []
-  try {
-    const db = await getDB()
-    dbRows = await db`SELECT * FROM contact_messages WHERE archived = FALSE ORDER BY created_at DESC LIMIT ${limit}`
-  } catch (e) {
-    console.error('[db] Failed to get contact messages from DB (using fallback store only):', e)
-  }
-  const merged = mergeContactRows(dbRows, fileRows).filter(r => !r.archived).slice(0, limit)
-  console.log('[db] Fetched', merged.length, 'active contact messages (DB + fallback merged)')
-  return merged
+  return (await dbGetContactMessagesWithStatus(limit, false)).rows
 }
 
 export async function dbGetAllContactMessages(limit = 50) {
-  const fileRows = readContactStore()
-  let dbRows: any[] = []
-  try {
-    const db = await getDB()
-    dbRows = await db`SELECT * FROM contact_messages ORDER BY created_at DESC LIMIT ${limit}`
-  } catch (e) {
-    console.error('[db] Failed to get all contact messages from DB (using fallback store only):', e)
-  }
-  const merged = mergeContactRows(dbRows, fileRows).slice(0, limit)
-  console.log('[db] Fetched', merged.length, 'total contact messages (DB + fallback merged)')
-  return merged
+  return (await dbGetContactMessagesWithStatus(limit, true)).rows
 }
 
 export async function dbGetContactMessagesSummary() {
-  // Computed off the merged (DB + fallback store) row set so the numbers on
-  // the admin dashboard always match what dbGetAllContactMessages returns.
+  // Computed off the merged (DB + fallback) row set so the dashboard numbers
+  // always match the list.
   try {
-    const all = await dbGetAllContactMessages(100000)
+    const { rows: all, dbOk, dbError } = await dbGetContactMessagesWithStatus(100000, true)
     const dayAgo = Date.now() - 24 * 60 * 60 * 1000
     const activeRows = all.filter(r => !r.archived)
-    const summary = {
+    return {
       total: all.length,
       today: all.filter(r => r.created_at > dayAgo).length,
       hiring: activeRows.filter(r => r.intent === 'hiring').length,
       unique: new Set(activeRows.map(r => r.email)).size,
       active: activeRows.length,
+      dbOk,
+      dbError,
     }
-    console.log('[db] Contact summary:', summary)
-    return summary
   } catch (e) {
     console.error('[db] Failed to get contact messages summary:', e)
-    return { total: 0, today: 0, hiring: 0, unique: 0, active: 0 }
+    return { total: 0, today: 0, hiring: 0, unique: 0, active: 0, dbOk: false, dbError: errText(e) }
   }
 }
 
