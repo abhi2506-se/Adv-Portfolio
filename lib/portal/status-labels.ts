@@ -1,0 +1,53 @@
+export const STATUS_LABELS: Record<string, string> = {
+  draft: "Draft",
+  pending_payment: "Awaiting Advance Payment",
+  under_review: "Under Review",
+  accepted: "Accepted",
+  rejected: "Rejected",
+  refunded: "Refunded",
+  planning: "Planning",
+  design: "Design",
+  development: "Development",
+  testing: "Testing",
+  client_review: "Awaiting Your Review",
+  approved: "Approved",
+  final_payment_pending: "Awaiting Final Payment",
+  delivered: "Delivered",
+  completed: "Completed",
+  cancelled: "Cancelled",
+}
+
+export const STATUS_COLOR: Record<string, string> = {
+  draft: "bg-gray-200 text-gray-800",
+  pending_payment: "bg-amber-100 text-amber-800",
+  under_review: "bg-blue-100 text-blue-800",
+  accepted: "bg-emerald-100 text-emerald-800",
+  rejected: "bg-red-100 text-red-800",
+  refunded: "bg-red-100 text-red-800",
+  planning: "bg-indigo-100 text-indigo-800",
+  design: "bg-indigo-100 text-indigo-800",
+  development: "bg-indigo-100 text-indigo-800",
+  testing: "bg-indigo-100 text-indigo-800",
+  client_review: "bg-amber-100 text-amber-800",
+  approved: "bg-emerald-100 text-emerald-800",
+  final_payment_pending: "bg-amber-100 text-amber-800",
+  delivered: "bg-emerald-100 text-emerald-800",
+  completed: "bg-emerald-200 text-emerald-900",
+  cancelled: "bg-gray-200 text-gray-800",
+}
+
+// What the client should do next, surfaced prominently on the project page.
+export const NEXT_ACTION: Record<string, string> = {
+  pending_payment: "Pay the advance to submit your project for review.",
+  under_review: "We're reviewing your project. You'll be notified once it's accepted.",
+  accepted: "Your project has been accepted — planning will begin shortly.",
+  rejected: "This project wasn't accepted. If eligible, your refund has been initiated.",
+  planning: "We're planning your project's scope and timeline.",
+  design: "Our team is working on the design phase.",
+  development: "Your project is actively in development.",
+  testing: "We're testing your project before it comes to you for review.",
+  client_review: "Please review the delivered work and approve or request changes.",
+  final_payment_pending: "Please complete the final payment to receive your delivery.",
+  delivered: "Your final delivery is ready — check the Delivery tab.",
+  completed: "This project is complete. Thanks for working with us!",
+}

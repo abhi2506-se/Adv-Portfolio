@@ -1,0 +1,12 @@
+{
+  "_comment": "Add these to your existing package.json dependencies",
+  "dependencies_to_add": {
+    "mermaid": "^10.9.0",
+    "@tanstack/react-query": "^5.28.0"
+  },
+  "devDependencies_to_add": {
+    "@types/node": "^20.0.0"
+  },
+  "_install_command": "npm install mermaid @tanstack/react-query",
+  "_note": "All other packages (framer-motion, lucide-react, shadcn/ui components) are already in your portfolio"
+}
