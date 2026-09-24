@@ -1,8 +1,25 @@
-import { NextResponse } from 'next/server'
-import { dbSaveContactMessage, dbGetContactMessages, dbGetAllContactMessages, dbGetContactMessagesSummary, dbDeleteContactMessage, dbArchiveContactMessage, dbSaveSuspiciousActivity, dbIsIPBlocked, dbBlockIP, dbGetSuspiciousActivities } from '@/lib/db'
+import { NextRequest, NextResponse } from 'next/server'
+import { dbSaveContactMessage, dbGetContactMessagesWithStatus, dbGetContactMessagesSummary, dbDeleteContactMessage, dbArchiveContactMessage, dbSaveSuspiciousActivity, dbIsIPBlocked, dbBlockIP, dbGetSuspiciousActivities } from '@/lib/db'
 import nodemailer from 'nodemailer'
 import { sendPushToAdmin } from '@/lib/notifications'
 import { SYSTEM_FROM, CONTACT_FROM, withNoReplyNotice } from '@/lib/mail-identities'
+import { SESSION_COOKIE, verifyToken } from '@/lib/admin-auth'
+import { CO_ADMIN_SESSION_COOKIE, verifyCoAdminToken } from '@/lib/co-admin-auth'
+
+// Never cache: the admin inbox must always reflect the database right now.
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+// Give SMTP + DB enough time on serverless hosts before the function is frozen.
+export const maxDuration = 30
+
+/** Main admin, or a co-admin who has the "messages" permission. */
+function isMessagesAdmin(req: NextRequest): boolean {
+  const main = req.cookies.get(SESSION_COOKIE)?.value
+  if (main && verifyToken(main)) return true
+  const co = verifyCoAdminToken(req.cookies.get(CO_ADMIN_SESSION_COOKIE)?.value)
+  return !!co && Array.isArray(co.permissions) && co.permissions.includes('messages')
+}
+const unauthorized = () => NextResponse.json({ data: [], error: 'Unauthorized' }, { status: 401 })
 
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -105,8 +122,8 @@ function detectIntent(message: string): string {
 
 async function sendAdminNotification({
   name, email, subject, message, intent, receivedAt,
-}: { name: string; email: string; subject: string; message: string; intent: string; receivedAt: string }) {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS || !process.env.ADMIN_EMAIL) return
+}: { name: string; email: string; subject: string; message: string; intent: string; receivedAt: string }): Promise<boolean> {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS || !process.env.ADMIN_EMAIL) return false
 
   const intentLabel = intent === 'hiring' ? '💼 Hiring Intent' : '💬 General Query'
   const html = `
@@ -157,8 +174,10 @@ async function sendAdminNotification({
       subject: `📬 New ${intent === 'hiring' ? '💼 Hiring' : '💬 General'} message from ${name}`,
       html,
     })
+    return true
   } catch (e) {
     console.error('[contact] Admin notification failed:', e)
+    return false
   }
 }
 
@@ -189,106 +208,101 @@ export async function POST(req: Request) {
       const ua = (req as any).headers?.get?.('user-agent') ||
         (req as any).headers?.['user-agent'] || 'unknown'
 
-      // Report abuse asynchronously (don't block the response)
-      reportAbuseToSecurity(name.trim(), email.trim(), message.trim(), ip, ua).catch(() => {})
+      // Awaited so serverless hosts don't freeze the function before it finishes
+      await reportAbuseToSecurity(name.trim(), email.trim(), message.trim(), ip, ua).catch(() => {})
     }
 
     const intent = detectIntent(message)
     const id = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
     const now = Date.now()
 
-    // Save to DB — wrapped in try/catch so a DB outage never blocks the form.
-    // The admin still receives the email notification even if the DB save fails.
-    try {
-      await dbSaveContactMessage({
-        id,
-        name: name.trim().slice(0, 100),
-        email: email.trim().toLowerCase().slice(0, 200),
-        subject: subject?.trim().slice(0, 200) || '',
-        message: message.trim().slice(0, 2000),
-        intent,
-        created_at: now,
-      })
-    } catch (dbErr) {
-      console.error('[contact] DB save failed (non-fatal):', dbErr)
-      // Continue — still send email + push so admin is notified
+    // 1) Persist. dbSaveContactMessage never throws; it tells us what happened.
+    const saved = await dbSaveContactMessage({
+      id,
+      name: name.trim().slice(0, 100),
+      email: email.trim().toLowerCase().slice(0, 200),
+      subject: subject?.trim().slice(0, 200) || '',
+      message: message.trim().slice(0, 2000),
+      intent,
+      created_at: now,
+    })
+    if (!saved.db) {
+      console.error(`[contact] MESSAGE ${id} WAS NOT SAVED TO THE DATABASE:`, saved.error || 'unknown error')
     }
 
-    // Send admin notification instantly (non-blocking)
+    // 2) Notify the admin. These are AWAITED (with a cap) — on serverless hosts
+    //    the function is frozen as soon as the response is sent, so
+    //    fire-and-forget emails/pushes are frequently never delivered.
     const receivedAt = new Date(now).toLocaleString('en-IN', {
       dateStyle: 'full',
       timeStyle: 'short',
       timeZone: 'Asia/Kolkata',
     })
-    sendAdminNotification({
-      name: name.trim(),
-      email: email.trim(),
-      subject: subject?.trim() || '',
-      message: message.trim(),
-      intent,
-      receivedAt,
-    })
+    const withTimeout = <T,>(p: Promise<T>, ms: number, fallback: T) =>
+      Promise.race([p, new Promise<T>(r => setTimeout(() => r(fallback), ms))])
 
-    // Push notification to admin device (non-blocking)
-    sendPushToAdmin({
-      title: intent === 'hiring' ? '💼 New Hiring Inquiry!' : '📬 New Contact Message',
-      body: `${name.trim()} — "${(message.trim()).slice(0, 80)}${message.length > 80 ? '…' : ''}"`,
-      tag: 'contact-message',
-      url: '/admin',
-    }).catch(() => {})
+    const [emailRes] = await Promise.allSettled([
+      withTimeout(sendAdminNotification({
+        name: name.trim(),
+        email: email.trim(),
+        subject: subject?.trim() || '',
+        message: message.trim(),
+        intent,
+        receivedAt,
+      }), 10000, false),
+      withTimeout(sendPushToAdmin({
+        title: intent === 'hiring' ? '💼 New Hiring Inquiry!' : '📬 New Contact Message',
+        body: `${name.trim()} — "${(message.trim()).slice(0, 80)}${message.length > 80 ? '…' : ''}"`,
+        tag: 'contact-message',
+        url: '/admin',
+      }).catch(() => 0), 8000, 0),
+    ])
+    const emailed = emailRes.status === 'fulfilled' && emailRes.value === true
 
-    return NextResponse.json({ ok: true, intent })
+    // 3) Be honest with the visitor: if it reached neither the DB nor the
+    //    admin's inbox, do NOT claim success.
+    if (!saved.stored && !emailed) {
+      return NextResponse.json(
+        { error: 'Sorry — your message could not be delivered right now. Please try again in a moment or email me directly.' },
+        { status: 503 },
+      )
+    }
+
+    return NextResponse.json({ ok: true, intent, stored: saved.db })
   } catch (e) {
     console.error('[contact] POST error:', e)
     return NextResponse.json({ error: 'Failed to send message' }, { status: 500 })
   }
 }
 
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
+  if (!isMessagesAdmin(req)) return unauthorized()
   try {
     const { searchParams } = new URL(req.url)
     const type = searchParams.get('type') || 'list'
     const includeArchived = searchParams.get('archived') === 'true'
+    const noStore = { headers: { 'Cache-Control': 'no-store, max-age=0' } }
 
     if (type === 'summary') {
       const summary = await dbGetContactMessagesSummary()
-      return NextResponse.json({ data: summary })
+      return NextResponse.json({ data: summary }, noStore)
     }
 
-    // Fixed: Fetch messages with proper logging and error handling
-    try {
-      // Fetch all messages (both active and archived)
-      const allMessages = await dbGetAllContactMessages(100)
-      
-      // Filter based on request parameter if needed
-      const messages = includeArchived ? allMessages : allMessages.filter((m: any) => !m.archived)
-      
-      // Ensure data is properly formatted
-      const formattedMessages = Array.isArray(messages) ? messages.map((m: any) => ({
-        id: String(m.id || ''),
-        name: String(m.name || ''),
-        email: String(m.email || ''),
-        subject: String(m.subject || ''),
-        message: String(m.message || ''),
-        intent: String(m.intent || 'general'),
-        archived: Boolean(m.archived),
-        // Ensure created_at is a number (timestamp in milliseconds)
-        created_at: typeof m.created_at === 'string' ? parseInt(m.created_at, 10) : Number(m.created_at),
-      })) : []
-      
-      console.log(`[contact] Fetched ${formattedMessages.length} messages (archived=${includeArchived})`)
-      return NextResponse.json({ data: formattedMessages })
-    } catch (dbErr) {
-      console.error('[contact] Database fetch failed:', dbErr)
-      return NextResponse.json({ data: [], error: 'Failed to fetch messages' }, { status: 500 })
-    }
-  } catch (e) {
+    // The admin UI does its own active/archived split, so by default return
+    // everything and let it decide (archived=false narrows it server-side).
+    const { rows, dbOk, dbError } = await dbGetContactMessagesWithStatus(200, true)
+    const list = searchParams.get('archived') === 'false' ? rows.filter(r => !r.archived) : rows
+    void includeArchived
+    console.log(`[contact] Returning ${list.length} messages (dbOk=${dbOk})`)
+    return NextResponse.json({ data: list, dbOk, dbError }, noStore)
+  } catch (e: any) {
     console.error('[contact] GET error:', e)
-    return NextResponse.json({ data: [], error: 'Internal server error' }, { status: 500 })
+    return NextResponse.json({ data: [], dbOk: false, dbError: String(e?.message || e), error: 'Internal server error' }, { status: 500 })
   }
 }
 
-export async function DELETE(req: Request) {
+export async function DELETE(req: NextRequest) {
+  if (!isMessagesAdmin(req)) return unauthorized()
   try {
     const { searchParams } = new URL(req.url)
     const id = searchParams.get('id')
@@ -301,7 +315,8 @@ export async function DELETE(req: Request) {
   }
 }
 
-export async function PATCH(req: Request) {
+export async function PATCH(req: NextRequest) {
+  if (!isMessagesAdmin(req)) return unauthorized()
   try {
     const { searchParams } = new URL(req.url)
     const id = searchParams.get('id')
