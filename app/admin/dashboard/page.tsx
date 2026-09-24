@@ -5270,17 +5270,32 @@ function MessagesSection({ onView }: { onView?: () => void }) {
   const [sendingReply, setSendingReply] = useState(false)
   const [replySuccess, setReplySuccess] = useState(false)
   const [replyError, setReplyError] = useState('')
+  // Surfaces real problems (DB unreachable, logged out…) instead of a silently empty inbox.
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   const load = async () => {
     setLoading(true)
+    setLoadError(null)
     try {
+      const opts: RequestInit = { cache: 'no-store', credentials: 'same-origin' }
       const [listRes, sumRes] = await Promise.all([
-        fetch('/api/contact').then(r => r.json()),
-        fetch('/api/contact?type=summary').then(r => r.json()),
+        fetch('/api/contact', opts).then(async r => ({ status: r.status, body: await r.json().catch(() => ({})) })),
+        fetch('/api/contact?type=summary', opts).then(async r => ({ status: r.status, body: await r.json().catch(() => ({})) })),
       ])
-      setMsgs(listRes.data || [])
-      setSummary(sumRes.data)
-    } catch {}
+      if (listRes.status === 401) {
+        setLoadError('Your admin session has expired or does not have access to Messages. Please log in again.')
+      } else if (listRes.body?.dbOk === false) {
+        setLoadError(`The database could not be reached, so messages may be missing. ${listRes.body.dbError ? `Details: ${listRes.body.dbError}` : ''}`.trim())
+      } else if (listRes.status >= 500) {
+        setLoadError('The server failed to load messages. Check the server logs for [contact] / [db] errors.')
+      }
+      setMsgs(Array.isArray(listRes.body?.data) ? listRes.body.data : [])
+      setSummary(sumRes.body?.data ?? null)
+      // A fresh load already reflects archive/delete state from the server.
+      setArchived(new Set()); setDeleted(new Set())
+    } catch (e: any) {
+      setLoadError(`Could not reach the server: ${e?.message || 'network error'}`)
+    }
     setLoading(false)
   }
 
@@ -5288,7 +5303,8 @@ function MessagesSection({ onView }: { onView?: () => void }) {
     const msg = msgs[idx]
     if (!msg) return
     try {
-      await fetch(`/api/contact?id=${encodeURIComponent(msg.id)}&action=archive`, { method: 'PATCH' })
+      const r = await fetch(`/api/contact?id=${encodeURIComponent(msg.id)}&action=archive`, { method: 'PATCH' })
+      if (!r.ok) { setLoadError('Could not archive that message — please try again.'); return }
       setArchived(prev => { const s = new Set(prev); s.add(idx); return s })
     } catch {}
   }
@@ -5301,8 +5317,9 @@ function MessagesSection({ onView }: { onView?: () => void }) {
     const msg = msgs[idx]
     if (!msg) return
     try {
-      await fetch(`/api/contact?id=${encodeURIComponent(msg.id)}`, { method: 'DELETE' })
-      setDeleted(prev => { const s = new Set(prev); s.add(idx); return s })
+      const r = await fetch(`/api/contact?id=${encodeURIComponent(msg.id)}`, { method: 'DELETE' })
+      if (!r.ok) { setLoadError('Could not delete that message — please try again.') }
+      else setDeleted(prev => { const s = new Set(prev); s.add(idx); return s })
     } catch {}
     setConfirmDelete(null)
   }
@@ -5383,6 +5400,17 @@ function MessagesSection({ onView }: { onView?: () => void }) {
           </button>
         </div>
       </div>
+
+      {loadError && (
+        <div className="flex items-start gap-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <div className="min-w-0">
+            <p className="font-semibold text-red-200">Messages could not be loaded fully</p>
+            <p className="text-red-300/90 break-words">{loadError}</p>
+            <p className="text-red-300/70 text-xs mt-1">Tip: open <code>/api/admin/db-health</code> while logged in to see whether DATABASE_URL and the contact_messages table are OK.</p>
+          </div>
+        </div>
+      )}
 
       {/* Stats matching admin panel categories */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
